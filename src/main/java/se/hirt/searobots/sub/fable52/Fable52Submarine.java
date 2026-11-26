@@ -80,6 +80,13 @@ public class Fable52Submarine implements SubmarineController {
 	private int launches, ownDetonations;
 	/** What the enemy does when shot at: 0 unknown, 1 runs, -1 does not. */
 	private int enemyRuns;
+	private boolean enemyRunsObserved;
+	/** Enemy weapons counted so far: never more than he has really fired. */
+	private int enemyLaunched, salvoPeak;
+	private long lastHostileEchoTick;
+	/** Enemy active sonar pings heard, and since when we have been listening for them. */
+	private int enemyPings;
+	private long enemyPingTick, firstContactTick;
 	private int hitsAtLastSalvo;
 	private boolean salvoJudged = true;
 
@@ -98,6 +105,7 @@ public class Fable52Submarine implements SubmarineController {
 	private long searchUntil;
 	private boolean pingedLastTick;
 	private boolean gotEnemyEcho;
+	private boolean urgent;
 	private String mode = "INIT";
 
 	@Override
@@ -131,6 +139,12 @@ public class Fable52Submarine implements SubmarineController {
 		enemyDead = false;
 		ownHits = launches = ownDetonations = 0;
 		enemyRuns = 0;
+		enemyRunsObserved = false;
+		enemyLaunched = salvoPeak = 0;
+		lastHostileEchoTick = -100000;
+		enemyPings = 0;
+		enemyPingTick = -100000;
+		firstContactTick = -1;
 		salvoJudged = true;
 		salvoLeft = 0;
 		lastFuse = 17.0;
@@ -178,6 +192,23 @@ public class Fable52Submarine implements SubmarineController {
 		readPassive(in);
 		plot.expire(tick);
 		judgeLastSalvo();
+		if (salvoPeak > 0 && (tick - lastHostileEchoTick) > 50 * 70) {
+			enemyLaunched += salvoPeak;
+			salvoPeak = 0;
+		}
+		if (firstContactTick < 0 && enemy.valid) {
+			firstContactTick = tick;
+		}
+		if (!enemyRunsObserved && firstContactTick >= 0) {
+			// A boat that pings all the time is a hunter, not a hider; one that stays silent is
+			// more likely to slip away when shot at. Only a prior: what he actually does overrides it.
+			double listened = (tick - firstContactTick) * 0.02;
+			if (enemyPings >= 4) {
+				enemyRuns = 0;
+			} else if (listened > 60) {
+				enemyRuns = 1;
+			}
+		}
 
 		pingedLastTick = in.activeSonarCooldownTicks() == 0;
 		if (pingedLastTick) {
@@ -185,6 +216,7 @@ public class Fable52Submarine implements SubmarineController {
 		}
 
 		double wantHeading, wantDepth = COMBAT_DEPTH, wantSpeed;
+		urgent = false;
 		boolean threatened = gatherThreats();
 		boolean suspect = !threatened && tick < suspectUntil && enemy.valid;
 
@@ -211,6 +243,7 @@ public class Fable52Submarine implements SubmarineController {
 			}
 			wantSpeed = Helm.MAX_SPEED;
 			wantDepth = Geo.clamp(z, -200, -55);
+			urgent = true;
 		} else if (objectiveIndex < objectives.size()) {
 			// ── Mandatory navigation objectives ──
 			mode = "OBJECTIVE";
@@ -229,7 +262,8 @@ public class Fable52Submarine implements SubmarineController {
 			if (tick > searchUntil || !lookout.haveGoal
 					|| Math.hypot(lookout.goalX - x, lookout.goalY - y) < 350) {
 				boolean hint = enemy.valid && !enemyDead;
-				lookout.chooseGoal(tick, x, y, enemy.px(tick), enemy.py(tick), hint);
+				boolean wary = hint && enemyLaunched < config.torpedoCount();
+				lookout.chooseGoal(tick, x, y, enemy.x, enemy.y, hint, wary ? 4300 : 0);
 				searchUntil = tick + 50 * 150;
 			}
 			wantHeading = lookout.haveGoal ? navigate(lookout.goalX, lookout.goalY) : heading;
@@ -242,24 +276,33 @@ public class Fable52Submarine implements SubmarineController {
 			double ex = enemy.px(tick), ey = enemy.py(tick);
 			double range = Math.hypot(ex - x, ey - y);
 			double bearing = Geo.bearing(x, y, ex, ey);
-			boolean enemyDry = plot.hostileSeen >= config.torpedoCount();
+			boolean enemyDry = enemyLaunched >= config.torpedoCount();
 			boolean dry = torpedoes == 0;
 			if (tick - assessedTick >= 50) {
 				assessShot(ex, ey, bearing);
 				assessedTick = tick;
 			}
+			// Out of sight is not out of danger: while he cannot be seen he may have closed, and he
+			// may have fired. Assess as if he had come straight for us since the last echo.
+			double blind = enemy.fixAgeSeconds(tick);
+			boolean unseen = blind > 8.0;
 			if (tick - escapeCheckedTick >= 150) {
-				assessEscape(ex, ey, bearing, range, enemyDry);
+				double creep = unseen ? Math.min(7.0 * blind, range * 0.5) : 0;
+				assessEscape(ex - Math.sin(bearing) * creep, ey - Math.cos(bearing) * creep, bearing, range - creep,
+						enemyDry, unseen ? 14.0 : 7.0);
 				escapeCheckedTick = tick;
 			}
 			if (tick > sideUntil) {
-				// Pass on the side with more sea room.
-				double right = chart.freeRun(x, y, bearing + Math.toRadians(100), 2500);
-				double left = chart.freeRun(x, y, bearing - Math.toRadians(100), 2500);
-				if (Math.abs(right - left) > 300) {
+				// Keep him on the side he is already on, unless the sea room says otherwise.
+				double right = chart.freeRun(x, y, bearing + Math.toRadians(110), 2500);
+				double left = chart.freeRun(x, y, bearing - Math.toRadians(110), 2500);
+				int natural = Geo.diff(heading, bearing) < 0 ? 1 : -1;
+				if (Math.abs(right - left) > 900) {
 					side = right > left ? 1 : -1;
+				} else {
+					side = natural;
 				}
-				sideUntil = tick + 50 * 20;
+				sideUntil = tick + 50 * 30;
 			}
 			if (!escapable) {
 				// He could hit us from where he is: get out along the route that fails least.
@@ -282,16 +325,16 @@ public class Fable52Submarine implements SubmarineController {
 				wantSpeed = 12.0;
 			} else if (!comfortable) {
 				mode = "HOLD";
-				wantHeading = clearHeading(bearing + side * Math.toRadians(100), 900);
-				wantSpeed = 10.5;
-			} else if (range > 4800) {
+				wantHeading = clearHeading(bearing + side * Math.toRadians(115), 900);
+				wantSpeed = 12.0;
+			} else if (range > 5200 && !unseen) {
 				mode = "CLOSE";
 				wantHeading = navigate(ex, ey);
 				wantSpeed = 11.0;
 			} else {
 				mode = "STALK";
-				wantHeading = clearHeading(bearing + side * Math.toRadians(40), 900);
-				wantSpeed = 10.5;
+				wantHeading = clearHeading(bearing + side * Math.toRadians(unseen ? 90 : 62), 900);
+				wantSpeed = 12.0;
 			}
 			considerFiring(out, ex, ey, range, bearing, enemyDry);
 		}
@@ -301,7 +344,7 @@ public class Fable52Submarine implements SubmarineController {
 			wantSpeed = Math.min(wantSpeed, 3.0);
 		}
 		continueSalvo(out);
-		helm.drive(in, out, wantHeading, wantDepth, wantSpeed, false);
+		helm.drive(in, out, wantHeading, wantDepth, wantSpeed, false, urgent);
 		publish(out, wantHeading, wantDepth);
 	}
 
@@ -375,12 +418,21 @@ public class Fable52Submarine implements SubmarineController {
 			gotEnemyEcho = true;
 		}
 		plot.beginPing();
+		int weapons = 0;
 		for (SonarContact c : returns) {
 			if (c == sub || !(c.range() > 0)) {
 				continue;
 			}
+			weapons++;
 			plot.observe(tick, x, y, echoX(c), echoY(c), c.estimatedDepth(), enemy.px(tick), enemy.py(tick),
 					enemy.valid);
+		}
+		// Count the enemy's magazine down. Only weapons that cannot be ours are counted, and each
+		// salvo by the most seen in one ping, so the count can run low but never high.
+		int hostile = Math.max(0, weapons - ownWeaponsRunning());
+		if (hostile > 0) {
+			salvoPeak = Math.max(salvoPeak, hostile);
+			lastHostileEchoTick = tick;
 		}
 	}
 
@@ -404,6 +456,10 @@ public class Fable52Submarine implements SubmarineController {
 		for (SonarContact c : in.sonarContacts()) {
 			// Torpedoes are heard without any range solution at all.
 			boolean weapon = c.range() == 0 && c.rangeUncertainty() == 0;
+			if (!weapon && c.signalExcess() > 85 && tick - enemyPingTick > 100) {
+				enemyPings++; // nothing but an active ping is that loud
+				enemyPingTick = tick;
+			}
 			if (weapon) {
 				torps++;
 				if (c.signalExcess() > loudest) {
@@ -436,24 +492,24 @@ public class Fable52Submarine implements SubmarineController {
 	// ── Assessment ───────────────────────────────────────────────────
 
 	/** Could we still get away if he fired from where he is now? */
-	private void assessEscape(double ex, double ey, double bearing, double range, boolean enemyDry) {
+	private void assessEscape(double ex, double ey, double bearing, double range, boolean enemyDry, double delay) {
 		if (enemyDry) {
 			escapable = comfortable = true;
 			return;
 		}
 		// With some margin: as if he were a few hundred metres closer and his weapon a little faster.
-		double closer = Math.min(450, range * 0.2);
+		double closer = Math.min(600, range * 0.25);
 		escape.clearThreats();
 		escape.addThreat(ex - Math.sin(bearing) * closer, ey - Math.cos(bearing) * closer, Engagement.TORPEDO_FUEL,
-				23.2);
-		comfortable = escape.plan(x, y, heading, speed, hpRatio, 6.0, 8.0);
+				23.6);
+		comfortable = escape.plan(x, y, heading, speed, hpRatio, delay, 14.0);
 		if (comfortable) {
 			escapable = true;
 			return;
 		}
 		escape.clearThreats();
-		escape.addThreat(ex, ey, Engagement.TORPEDO_FUEL, 22.8);
-		escapable = escape.plan(x, y, heading, speed, hpRatio, 5.0, 5.0);
+		escape.addThreat(ex, ey, Engagement.TORPEDO_FUEL, 23.2);
+		escapable = escape.plan(x, y, heading, speed, hpRatio, 5.0, 8.0);
 		if (!escapable) {
 			adoptRoute(false);
 		}
@@ -483,10 +539,12 @@ public class Fable52Submarine implements SubmarineController {
 		if (enemy.valid && enemy.hasVelocity() && enemy.fixAgeSeconds(tick) < 6 && enemy.speed() > 12.0
 				&& since > 15 && since < 200) {
 			enemyRuns = 1;
+			enemyRunsObserved = true;
 			salvoJudged = true;
 		} else if (ownHits > hitsAtLastSalvo) {
-			if (enemyRuns == 0) {
+			if (!enemyRunsObserved) {
 				enemyRuns = -1;
+				enemyRunsObserved = true;
 			}
 			salvoJudged = true;
 		} else if (since > 260) {
@@ -682,7 +740,8 @@ public class Fable52Submarine implements SubmarineController {
 			double range = enemy.valid ? Math.hypot(enemy.px(tick) - x, enemy.py(tick) - y) : -1;
 			out.setStatus(String.format(Locale.ROOT, "%s R%.0f %s%s%s%s e%d h%d r%d%s", mode, range,
 					escapable ? "s" : "-", comfortable ? "m" : "-", canKill ? "K" : (straightHit ? "k" : "-"),
-					nearMiss ? "n" : "", plot.hostileSeen, ownHits, enemyRuns, helm.terrainAlarm ? " TERR" : ""));
+					nearMiss ? "n" : "", enemyLaunched + salvoPeak, ownHits, enemyRuns,
+					helm.terrainAlarm ? " TERR" : ""));
 		}
 	}
 }

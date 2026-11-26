@@ -89,7 +89,7 @@ final class WeaponPlot {
 				continue;
 			}
 			double dt = (tick - w.tick) * 0.02;
-			double gate = 50 + 28 * dt;
+			double gate = 50 + 28 * Math.min(dt, 25);
 			double d = Math.hypot(x - (w.x + w.vx * dt), y - (w.y + w.vy * dt));
 			double plain = Math.hypot(x - w.x, y - w.y);
 			if (Math.min(d, plain) < gate && d < bestD) {
@@ -155,7 +155,7 @@ final class WeaponPlot {
 				continue;
 			}
 			double unseen = (tick - w.tick) * 0.02;
-			if ((w.misses >= 3 && unseen > 12) || unseen > 40 || w.fuelLeft(tick) < -12) {
+			if ((w.misses >= 4 && unseen > 20) || unseen > 60 || w.fuelLeft(tick) < -12) {
 				w.live = false;
 			}
 		}

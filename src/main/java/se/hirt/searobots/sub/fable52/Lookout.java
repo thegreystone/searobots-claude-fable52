@@ -62,9 +62,10 @@ final class Lookout {
 
 	/**
 	 * Picks the reachable place from which the most stale water can be seen, preferring ones close
-	 * by and (if given) close to where the enemy was last known to be.
+	 * by and (if given) close to where the enemy was last known to be - but, if {@code keepOut} is
+	 * set, no closer to that spot than that.
 	 */
-	void chooseGoal(long tick, double x, double y, double hintX, double hintY, boolean hint) {
+	void chooseGoal(long tick, double x, double y, double hintX, double hintY, boolean hint, double keepOut) {
 		int n = chart.n;
 		int home = chart.regionAt(x, y);
 		double best = -1;
@@ -78,6 +79,9 @@ final class Lookout {
 				double dist = Math.hypot(cx - x, cy - y);
 				if (dist < 500) {
 					continue;
+				}
+				if (hint && keepOut > 0 && Math.hypot(cx - hintX, cy - hintY) < keepOut) {
+					continue; // do not go looking for him inside his own firing range
 				}
 				int stale = 0;
 				for (int dr = -15; dr <= 15; dr += 5) {

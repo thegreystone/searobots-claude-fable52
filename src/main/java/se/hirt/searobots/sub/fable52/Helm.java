@@ -128,6 +128,16 @@ final class Helm {
 	 *            sprint-and-drift with the clutch out when possible, and gentle tank work
 	 */
 	void drive(SubmarineInput in, SubmarineOutput out, double heading, double depth, double speed, boolean quiet) {
+		drive(in, out, heading, depth, speed, quiet, false);
+	}
+
+	/**
+	 * @param urgent
+	 *            a weapon is chasing the boat: stopping is not an option. Trouble ahead is answered
+	 *            by slowing only as much as tightens the turn, never by backing off.
+	 */
+	void drive(SubmarineInput in, SubmarineOutput out, double heading, double depth, double speed, boolean quiet,
+			boolean urgent) {
 		var state = in.self();
 		var pose = state.pose();
 		Vec3 pos = pose.position();
@@ -184,10 +194,18 @@ final class Helm {
 		// Trouble on the predicted path that no turn avoids: first slow down (a slower boat turns
 		// tighter); if it is inside stopping distance, back off and swing the bow to open water.
 		double commit = Math.max(12.0, absV * 2.3 + 7.0);
-		if (cachedHazardTime < 50 && !backingOff) {
+		if (urgent) {
+			backingOff = false;
+			if (cachedHazardTime < commit) {
+				heading = openWaterHeading(pos, pose.heading());
+				speed = Math.min(speed, 7.0);
+			} else if (cachedHazardTime < commit + 15) {
+				speed = Math.min(speed, 9.5);
+			}
+		} else if (cachedHazardTime < 50 && !backingOff) {
 			speed = Math.min(speed, cachedHazardTime < commit + 12 ? 2.5 : 4.5);
 		}
-		if (cachedHazardTime < commit && v > -0.3 && !backingOff) {
+		if (!urgent && cachedHazardTime < commit && v > -0.3 && !backingOff) {
 			backingOff = true;
 			backOffSince = tick;
 			backOffHeading = openWaterHeading(pos, pose.heading());
@@ -243,7 +261,7 @@ final class Helm {
 			drifting = false;
 			throttle = Geo.clamp(steady + 0.4 * (speed - v), 0, 1);
 			if (v > speed + 2.5 && cachedHazardTime < 50) {
-				throttle = -0.6; // shed speed quickly when a turn has to be tightened
+				throttle = urgent ? 0.0 : -0.6; // shed speed quickly when a turn has to be tightened
 			}
 		}
 
@@ -267,12 +285,12 @@ final class Helm {
 		double b = (2.4525e7 + 576562.0 * v * v) / ip;
 		double pitchSinMax = Math.min(0.9, Math.abs(a) * CL_MAX / b);
 		double pitchLim = Math.min(Math.toRadians(22), Math.asin(pitchSinMax) * 0.85);
-		boolean urgent = ceilingNow > pos.z() - 3;
+		boolean pressed = ceilingNow > pos.z() - 3;
 		boolean emergency = ceilingNow > pos.z() + 2 && zCmd > pos.z() + 2;
 		double ez = zCmd - (pos.z() + vz * 5.0); // act on where the boat will be shortly
 		double absEz = Math.abs(ez);
 		double diveLim = Math.min(Math.toRadians(8), pitchLim);
-		double climbLim = Math.min(urgent ? Math.toRadians(20) : Math.toRadians(12), pitchLim);
+		double climbLim = Math.min(pressed ? Math.toRadians(20) : Math.toRadians(12), pitchLim);
 		double vzMax = 1.25 + absV * Math.sin(ez > 0 ? climbLim : diveLim);
 		double vzDes = Math.signum(ez) * Math.min(vzMax, Math.min(absEz * 0.10, Math.sqrt(0.08 * absEz)));
 		if (emergency) {
@@ -298,7 +316,7 @@ final class Helm {
 		}
 		double force = 399750.0 * heaveDes * Math.abs(heaveDes) + 5.625e6 * 0.6 * (heaveDes - heave);
 		double ballastWanted = Geo.clamp(0.5 + force / (2 * 735750.0), 0, 1);
-		if (quiet && !urgent) {
+		if (quiet && !pressed) {
 			// Working the tanks is audible; creep instead.
 			double maxStep = 0.015 * in.deltaTimeSeconds();
 			ballastCmd += Geo.clamp(ballastWanted - ballastCmd, -maxStep, maxStep);

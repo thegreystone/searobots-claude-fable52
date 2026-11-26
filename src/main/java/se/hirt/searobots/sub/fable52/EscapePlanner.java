@@ -139,7 +139,7 @@ final class EscapePlanner {
 				continue;
 			}
 			double turn = Math.abs(Geo.wrap(h - heading));
-			double t = delay + spoolUp + 22.0 * Math.pow(turn / (Math.PI / 2), 1.2) + SEED_RADIUS / run;
+			double t = delay + spoolUp + 20.0 * Math.pow(turn / (Math.PI / 2), 1.55) + SEED_RADIUS / run;
 			if (t + margin >= arrival(px, py)) {
 				continue;
 			}
@@ -187,7 +187,10 @@ final class EscapePlanner {
 					}
 					double len = (dr != 0 && dc != 0) ? 141.42 : 100.0;
 					// Water near shoals is slower going: the helm has to be careful there.
-					double slow = 1.0 + 0.12 * (0.5 * (k + costHere) - 1.0);
+					double slow = 1.0 + 0.3 * (0.5 * (k + costHere) - 1.0);
+					if (k > 4.0 && costHere <= 4.0) {
+						slow *= 2.5; // heading into tight water at speed is asking for trouble
+					}
 					float t = (float) (time[cur] + len / run * slow);
 					int ni = nr * n + nc;
 					if (stamp[ni] == searchId && t >= time[ni]) {
