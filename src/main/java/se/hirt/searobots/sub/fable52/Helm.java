@@ -276,12 +276,12 @@ final class Helm {
 		double vzMax = 1.25 + absV * Math.sin(ez > 0 ? climbLim : diveLim);
 		double vzDes = Math.signum(ez) * Math.min(vzMax, Math.min(absEz * 0.10, Math.sqrt(0.08 * absEz)));
 		if (emergency) {
-			vzDes = vzMax; // the sea floor is coming up: everything the boat has
+			// The sea floor is coming up: climb hard, but ease off before breaking the surface.
+			vzDes = Math.min(vzMax, Math.max(0.3, 0.12 * (-10.0 - pos.z())));
 		}
 		double thetaDes = 0;
 		if (v > 2.5) {
-			thetaDes = emergency ? climbLim
-					: Math.asin(Geo.clamp(vzDes * 0.8 / v, -Math.sin(diveLim), Math.sin(climbLim)));
+			thetaDes = Math.asin(Geo.clamp(vzDes * (emergency ? 1.0 : 0.8) / v, -Math.sin(diveLim), Math.sin(climbLim)));
 		}
 		double planes = 0;
 		if (Math.abs(a) > 1e-5) {
@@ -292,7 +292,10 @@ final class Helm {
 			planes = clP / CL_PER_UNIT;
 		}
 		double heave = vz - v * Math.sin(pitch);
-		double heaveDes = emergency ? 1.3 : Geo.clamp(vzDes - v * Math.sin(pitch), -1.3, 1.3);
+		double heaveDes = Geo.clamp(vzDes - v * Math.sin(pitch), -1.3, 1.3);
+		if (emergency && pos.z() < -45) {
+			heaveDes = 1.3;
+		}
 		double force = 399750.0 * heaveDes * Math.abs(heaveDes) + 5.625e6 * 0.6 * (heaveDes - heave);
 		double ballastWanted = Geo.clamp(0.5 + force / (2 * 735750.0), 0, 1);
 		if (quiet && !urgent) {

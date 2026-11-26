@@ -43,6 +43,41 @@ import java.util.concurrent.Future;
 public final class Lab {
 
 	private static final PrintStream OUT = System.out;
+	private static final Map<Integer, Game> RUNNING = new java.util.concurrent.ConcurrentHashMap<>();
+	private static final long MAX_GAME_WALL_NANOS = 100_000_000_000L;
+	private static boolean TORP_TRACE;
+
+	/**
+	 * The engine's hull-on-seabed contact solver can lock up for minutes inside a single tick.
+	 * Reports any game whose simulation has stopped advancing, with the last state seen, and
+	 * returns how many are stuck.
+	 */
+	private static int reportStuck(java.util.Set<Integer> reported) {
+		int stuck = 0;
+		for (var g : RUNNING.values()) {
+			if (g.finished || System.nanoTime() - g.lastWall < 8_000_000_000L) {
+				continue;
+			}
+			stuck++;
+			if (!reported.add(g.number)) {
+				continue;
+			}
+			var sb = new StringBuilder();
+			var subs = g.lastSubs;
+			if (subs != null) {
+				for (var s : subs) {
+					var p = s.pose().position();
+					sb.append(String.format(Locale.ROOT, " [%s hp=%d (%.0f,%.0f,%.1f) hdg=%.0f pitch=%.1f v=%.2f '%s']",
+							s.name(), s.hp(), p.x(), p.y(), p.z(), Math.toDegrees(s.pose().heading()),
+							Math.toDegrees(s.pose().pitch()), s.speed(), s.status()));
+				}
+			}
+			OUT.printf(Locale.ROOT, "STUCK #%02d seed=%016x %s tick=%d%s%n", g.number, g.seed, g.swapped ? "swp" : "",
+					g.lastTick, sb);
+			OUT.flush();
+		}
+		return stuck;
+	}
 
 	private Lab() {
 	}
@@ -76,6 +111,7 @@ public final class Lab {
 			case "--every" -> every = Integer.parseInt(args[++i]);
 			case "--no-limits" -> limits = false;
 			case "--verbose" -> verbose = true;
+			case "--torp" -> TORP_TRACE = true;
 			default -> throw new IllegalArgumentException("Unknown argument " + args[i]);
 			}
 		}
@@ -182,15 +218,56 @@ public final class Lab {
 				final long s = seeds[i];
 				futures.add(pool.submit(() -> play(n, s, n % 2 == 0, a, b, minutes, limits, 0, false)));
 			}
-			for (var f : futures) {
-				results.add(f.get());
+			var reported = new java.util.HashSet<Integer>();
+			var pending = new ArrayList<>(futures);
+			while (!pending.isEmpty()) {
+				for (var it = pending.iterator(); it.hasNext();) {
+					var f = it.next();
+					if (f.isDone()) {
+						it.remove();
+						var g = f.get();
+						results.add(g);
+						if (verbose || g.winner != 1) {
+							OUT.println(g.summaryLine());
+							OUT.flush();
+						}
+					}
+				}
+				if (!pending.isEmpty()) {
+					Thread.sleep(500);
+					if (reportStuck(reported) >= pending.size()) {
+						OUT.printf(Locale.ROOT, "%d game(s) stuck in the engine; abandoning them%n", pending.size());
+						abandoned = pending.size();
+						break;
+					}
+				}
+			}
+			if (abandoned > 0) {
+				games -= abandoned;
+				summarize(a, b, games, results, t0);
+				OUT.flush();
+				System.exit(3);
 			}
 		}
+		summarize(a, b, games, results, t0);
+	}
+
+	private static int abandoned;
+
+	private static void summarize(ResolvedController a, ResolvedController b, int games, List<Game> results, long t0) {
 		int w = 0, l = 0, d = 0;
+		int slow = 0;
 		for (var g : results) {
-			if (verbose || g.winner != 1) {
-				OUT.println(g.summaryLine());
+			if (g.slow) {
+				slow++;
 			}
+		}
+		if (slow > 0) {
+			results = results.stream().filter(g -> !g.slow).toList();
+			games -= slow;
+			OUT.printf(Locale.ROOT, "(%d game(s) dropped: engine too slow to finish)%n", slow);
+		}
+		for (var g : results) {
 			if (g.winner == 1) {
 				w++;
 			} else if (g.winner == -1) {
@@ -269,13 +346,19 @@ public final class Lab {
 		int number;
 		long seed;
 		boolean swapped;
+		volatile List<SubmarineSnapshot> lastSubs;
+		volatile long lastTick;
+		volatile long lastWall = System.nanoTime();
+		final long startWall = System.nanoTime();
+		volatile boolean finished;
+		boolean slow;
 		int winner; // 1 = a, -1 = b, 0 = draw
 		String reason;
 		long ticks;
 		Side[] side = {new Side(), new Side()};
 
 		String summaryLine() {
-			String outcome = winner > 0 ? "WIN " : winner < 0 ? "LOSS" : "DRAW";
+			String outcome = slow ? "----" : winner > 0 ? "WIN " : winner < 0 ? "LOSS" : "DRAW";
 			return String.format(Locale.ROOT,
 					"#%02d %016x %s %s %-7s %5ds  hp %4d/%4d  fired %d/%d hits %d/%d  cpu %dms  %s%s", number, seed,
 					swapped ? "swp" : "   ", outcome, reason, ticks / 50, side[0].hp, side[1].hp, side[0].fired,
@@ -313,6 +396,7 @@ public final class Lab {
 		game.number = number;
 		game.seed = seed;
 		game.swapped = swap;
+		RUNNING.put(number, game);
 		// index 0 = controller a, index 1 = controller b
 		int[] slotOf = swap ? new int[] {1, 0} : new int[] {0, 1};
 		int[] sideOfSlot = swap ? new int[] {1, 0} : new int[] {0, 1};
@@ -348,6 +432,12 @@ public final class Lab {
 
 			@Override
 			public void onTick(long tick, List<SubmarineSnapshot> subs, List<TorpedoSnapshot> torps) {
+				game.lastSubs = subs;
+				game.lastTick = tick;
+				game.lastWall = System.nanoTime();
+				if (game.lastWall - game.startWall > MAX_GAME_WALL_NANOS) {
+					sim.stop(); // the engine is crawling (usually a hull grinding on a beach)
+				}
 				for (var s : subs) {
 					String st = s.status() == null ? "" : s.status().replaceAll("[-+]?[0-9]*\\.?[0-9]+", "#");
 					statusTicks[s.id()].merge(st, 1, Integer::sum);
@@ -385,6 +475,17 @@ public final class Lab {
 									target.speed(), owner.speed(), owner.pose().position().z(),
 									target.pose().position().z(), owner.status());
 						}
+					}
+					if (trace && TORP_TRACE && tick % 250 == 0 && t.alive()) {
+						var tp = t.pose().position();
+						var gp = target.pose().position();
+						double estErr = Double.isNaN(t.diagEstX()) ? -1 : Math.hypot(t.diagEstX() - gp.x(), t.diagEstY() - gp.y());
+						double ownRange = dist(tp, owner.pose().position());
+						OUT.printf(Locale.ROOT,
+								"         torp %d (%s) pos=(%.0f,%.0f,%.0f) fl=%.0f v=%.1f h=%03.0f pitch=%+.0f fuel=%.0f rTgt=%.0f rOwn=%.0f estErr=%.0f tgtZ=%.0f estZ=%.0f %s%n",
+								t.id(), tag[t.ownerId()], tp.x(), tp.y(), tp.z(), world.terrain().elevationAt(tp.x(), tp.y()),
+								t.speed(), Math.toDegrees(t.pose().heading()), Math.toDegrees(t.pose().pitch()),
+								t.fuelRemaining(), r, ownRange, estErr, gp.z(), t.diagEstZ(), t.diagPhase());
 					}
 					tr.minRange = Math.min(tr.minRange, r);
 					tr.speedSum += t.speed();
@@ -458,7 +559,8 @@ public final class Lab {
 				}
 				if (trace && everySeconds > 0 && tick % (everySeconds * 50L) == 0) {
 					var sb = new StringBuilder();
-					sb.append(String.format(Locale.ROOT, "[%5.0fs] R=%5.0f", tick / 50.0, range(subs)));
+					sb.append(String.format(Locale.ROOT, "[%5.0fs] R=%5.0f occ=%3.0f", tick / 50.0, range(subs),
+							occlusion(world, subs.get(0).pose().position(), subs.get(1).pose().position())));
 					for (int side = 0; side < 2; side++) {
 						var s = subs.get(slotOf[side]);
 						var p = s.pose().position();
@@ -496,9 +598,13 @@ public final class Lab {
 		};
 
 		sim.run(world, controllers, vehicles, listener);
+		game.finished = true;
 		var result = sim.matchOutcome();
 		if (result == null) {
-			throw new IllegalStateException("No outcome");
+			game.reason = "SLOW";
+			game.slow = true;
+			game.ticks = game.lastTick;
+			return game;
 		}
 		game.ticks = result.tick() + 1;
 		boolean[] alive = new boolean[2];
@@ -524,6 +630,40 @@ public final class Lab {
 			game.reason = "TIMEOUT";
 		}
 		return game;
+	}
+
+	/** One-way sound loss (dB) from terrain and thermal layers between two points, as the engine models it. */
+	private static double occlusion(GeneratedWorld world, Vec3 a, Vec3 b) {
+		var terrain = world.terrain();
+		double dx = b.x() - a.x(), dy = b.y() - a.y();
+		double dist = Math.hypot(dx, dy);
+		double step = terrain.getCellSize() * 0.5;
+		int samples = Math.max(2, (int) Math.ceil(dist / step));
+		double total = 0;
+		for (int i = 1; i < samples; i++) {
+			double t = (double) i / samples;
+			double floor = terrain.elevationAt(a.x() + dx * t, a.y() + dy * t);
+			double line = a.z() + (b.z() - a.z()) * t;
+			if (floor > line) {
+				total += floor >= 0 ? 15.0 : 7.5 * Math.min((floor - line) / 50.0, 1.0);
+			}
+		}
+		for (var layer : world.thermalLayers()) {
+			boolean aAbove = a.z() > layer.top(), aBelow = a.z() < layer.bottom();
+			boolean bAbove = b.z() > layer.top(), bBelow = b.z() < layer.bottom();
+			double max = Math.clamp(3.0 + 0.5 * layer.gradient(), 5.0, 12.0);
+			if ((aAbove && bAbove) || (aBelow && bBelow)) {
+				total -= 2;
+			} else if (aAbove != bAbove && aBelow != bBelow) {
+				total += max;
+			} else if (layer.thickness() >= 1) {
+				total += max * Math.abs(Math.clamp(a.z(), layer.bottom(), layer.top())
+						- Math.clamp(b.z(), layer.bottom(), layer.top())) / layer.thickness();
+			} else {
+				total += max;
+			}
+		}
+		return total;
 	}
 
 	private static double range(List<SubmarineSnapshot> subs) {
