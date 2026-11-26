@@ -164,37 +164,30 @@ final class WeaponPlot {
 		}
 	}
 
-	/** The weapon that will reach us soonest, or null if none is coming our way. */
-	Weapon worstThreat(long tick, double selfX, double selfY) {
-		Weapon worst = null;
-		double worstTime = Double.MAX_VALUE;
-		for (Weapon w : weapons) {
-			if (!w.live) {
-				continue;
-			}
-			double fuel = w.fuelLeft(tick);
-			if (fuel <= -3) {
-				continue;
-			}
-			double range = Math.hypot(w.px(tick) - selfX, w.py(tick) - selfY);
-			boolean coming;
-			if (Double.isNaN(w.closing)) {
-				coming = w.hostile; // just launched at us; assume the worst until the next ping
-			} else if (w.own) {
-				// Our own weapon: only if it has plainly turned back on us.
-				coming = w.closing > 10 && range < 900 && (tick - w.firstTick) > 50 * 20;
-			} else {
-				coming = w.closing > 4;
-			}
-			if (!coming || range > 23.0 * Math.max(fuel, 0) + 300) {
-				continue;
-			}
-			double time = range / 22.0;
-			if (time < worstTime) {
-				worstTime = time;
-				worst = w;
+	/** True if the weapon is coming our way and has the legs to arrive. */
+	boolean isThreat(Weapon w, long tick, double selfX, double selfY) {
+		if (!w.live) {
+			return false;
+		}
+		double fuel = w.fuelLeft(tick);
+		if (fuel <= -3) {
+			return false;
+		}
+		double range = Math.hypot(w.px(tick) - selfX, w.py(tick) - selfY);
+		boolean coming;
+		if (Double.isNaN(w.closing)) {
+			coming = w.hostile; // just launched at us; assume the worst until the next ping
+		} else if (w.own) {
+			// Our own weapon: only if it has plainly turned back on us.
+			coming = w.closing > 10 && range < 900 && (tick - w.firstTick) > 50 * 20;
+		} else {
+			coming = w.closing > 4 || (w.hostile && w.sightings < 3 && w.closing > -4);
+			if (coming && !w.hostile && w.closing > 10 && range < 3000) {
+				// Not seen leaving his tubes, but it is plainly his: count it against his magazine.
+				w.hostile = true;
+				hostileSeen++;
 			}
 		}
-		return worst;
+		return coming && range <= 23.0 * Math.max(fuel, 0) + 300;
 	}
 }

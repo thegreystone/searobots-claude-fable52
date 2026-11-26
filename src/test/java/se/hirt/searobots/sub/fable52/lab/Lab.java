@@ -112,6 +112,7 @@ public final class Lab {
 			case "--no-limits" -> limits = false;
 			case "--verbose" -> verbose = true;
 			case "--torp" -> TORP_TRACE = true;
+
 			default -> throw new IllegalArgumentException("Unknown argument " + args[i]);
 			}
 		}
