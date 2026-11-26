@@ -1,0 +1,546 @@
+package se.hirt.searobots.sub.fable52.lab;
+
+import se.hirt.searobots.api.MatchConfig;
+import se.hirt.searobots.api.SubmarineController;
+import se.hirt.searobots.api.Vec3;
+import se.hirt.searobots.api.VehicleConfig;
+import se.hirt.searobots.engine.ControllerLoader;
+import se.hirt.searobots.engine.ControllerLoader.ResolvedController;
+import se.hirt.searobots.engine.GeneratedWorld;
+import se.hirt.searobots.engine.HullGeometry;
+import se.hirt.searobots.engine.SimulationListener;
+import se.hirt.searobots.engine.SimulationLoop;
+import se.hirt.searobots.engine.SimulationLoop.ControllerLimits;
+import se.hirt.searobots.engine.SubmarineSnapshot;
+import se.hirt.searobots.engine.TorpedoSnapshot;
+import se.hirt.searobots.engine.WorldGenerator;
+
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.SplittableRandom;
+import java.util.TreeMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+
+/**
+ * Headless observation lab. Runs league-rules matches between two controllers and reports ground
+ * truth: who fired from where, what each torpedo did, why a submarine died. Two modes:
+ *
+ * <pre>
+ *   Lab series --a fable --b claude --games 40 --seed 1 --threads 12
+ *   Lab trace  --a fable --b claude --seed 1f3 [--swap] [--every 10] [--minutes 120]
+ * </pre>
+ *
+ * Opponents are only ever observed from the outside: positions, published status strings and
+ * weapon behaviour. Nothing here looks inside another controller.
+ */
+public final class Lab {
+
+	private static final PrintStream OUT = System.out;
+
+	private Lab() {
+	}
+
+	public static void main(String[] args) throws Exception {
+		if (args.length == 0) {
+			OUT.println("usage: Lab series|trace --a <spec> --b <spec> [--games N] [--seed hex] [--threads N]"
+					+ " [--minutes N] [--swap] [--every seconds] [--quiet] [--no-limits]");
+			return;
+		}
+		String mode = args[0];
+		String a = "fable";
+		String b = "claude";
+		int games = 24;
+		long seed = 1;
+		int threads = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+		int minutes = 120;
+		boolean swap = false;
+		int every = 10;
+		boolean limits = true;
+		boolean verbose = false;
+		for (int i = 1; i < args.length; i++) {
+			switch (args[i]) {
+			case "--a" -> a = args[++i];
+			case "--b" -> b = args[++i];
+			case "--games" -> games = Integer.parseInt(args[++i]);
+			case "--seed" -> seed = Long.parseUnsignedLong(args[++i], 16);
+			case "--threads" -> threads = Integer.parseInt(args[++i]);
+			case "--minutes" -> minutes = Integer.parseInt(args[++i]);
+			case "--swap" -> swap = true;
+			case "--every" -> every = Integer.parseInt(args[++i]);
+			case "--no-limits" -> limits = false;
+			case "--verbose" -> verbose = true;
+			default -> throw new IllegalArgumentException("Unknown argument " + args[i]);
+			}
+		}
+		// The engine logs torpedo fates to stdout; keep our own report readable.
+		System.setOut(new PrintStream(OutputStream.nullOutputStream()));
+		var ca = resolve(a);
+		var cb = resolve(b);
+		if (mode.equals("nav")) {
+			nav(games, seed, threads, minutes, every);
+			OUT.flush();
+			return;
+		}
+		if (mode.equals("trace")) {
+			var g = play(1, seed, swap, ca, cb, minutes, limits, every, true);
+			OUT.println(g.summaryLine());
+		} else {
+			series(ca, cb, games, seed, threads, minutes, limits, verbose);
+		}
+		OUT.flush();
+	}
+
+	static ResolvedController resolve(String spec) {
+		if (spec.equalsIgnoreCase("fable")) {
+			spec = "se.hirt.searobots.sub.fable52.Fable52Submarine";
+		}
+		return ControllerLoader.resolve(spec);
+	}
+
+	// ── Solo navigation test ─────────────────────────────────────────
+
+	static void nav(int games, long masterSeed, int threads, int minutes, int everySeconds) throws Exception {
+		var rng = new SplittableRandom(masterSeed);
+		var lines = new ArrayList<Future<String>>();
+		try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
+			for (int i = 0; i < games; i++) {
+				final long seed = games == 1 ? masterSeed : rng.nextLong();
+				final boolean trace = games == 1;
+				lines.add(pool.submit(() -> navOne(seed, minutes, trace ? everySeconds : 0)));
+			}
+			for (var f : lines) {
+				OUT.println(f.get());
+			}
+		}
+	}
+
+	static String navOne(long seed, int minutes, int everySeconds) {
+		MatchConfig config = MatchConfig.withDefaults(seed).withMatchDurationTicks(minutes * 60 * 50);
+		GeneratedWorld world = new WorldGenerator().generate(config);
+		var sim = new SimulationLoop();
+		sim.setSpeedMultiplier(1e9);
+		sim.setControllerLimits(ControllerLimits.leagueDefaults());
+		var probe = new se.hirt.searobots.sub.fable52.NavProbe();
+		int[] hp = {config.startingHp()};
+		boolean[] forfeited = {false};
+		double[] minEdge = {1e9};
+		sim.run(world, List.of(probe), List.of(VehicleConfig.submarine()), new SimulationListener() {
+			@Override
+			public void onTick(long tick, List<SubmarineSnapshot> subs, List<TorpedoSnapshot> torps) {
+				var s = subs.getFirst();
+				var p = s.pose().position();
+				minEdge[0] = Math.min(minEdge[0], config.battleArea().distanceToBoundary(p.x(), p.y()));
+				if (s.hp() < hp[0] && everySeconds > 0) {
+					OUT.printf(Locale.ROOT, "[%5.0fs] DAMAGE %d -> hp %d at (%.0f,%.0f,%.0f) floor=%.0f v=%.1f '%s'%n",
+							tick / 50.0, hp[0] - s.hp(), s.hp(), p.x(), p.y(), p.z(),
+							world.terrain().elevationAt(p.x(), p.y()), s.speed(), s.status());
+				}
+				hp[0] = s.hp();
+				forfeited[0] = s.forfeited();
+				if (everySeconds > 0 && tick % (everySeconds * 50L) == 0) {
+					OUT.printf(Locale.ROOT,
+							"[%5.0fs] (%6.0f,%6.0f,%5.0f) fl=%5.0f h=%03.0f pitch=%+5.1f v=%4.1f SL=%3.0f thr=%+.2f rud=%+.2f pl=%+.2f '%s'%n",
+							tick / 50.0, p.x(), p.y(), p.z(), world.terrain().elevationAt(p.x(), p.y()),
+							Math.toDegrees(s.pose().heading()), Math.toDegrees(s.pose().pitch()), s.speed(),
+							s.sourceLevelDb(), s.throttle(), s.rudder(), s.sternPlanes(), s.status());
+				}
+			}
+
+			@Override
+			public void onMatchEnd() {
+			}
+		});
+		return String.format(Locale.ROOT,
+				"NAV %016x hp=%4d%s goals=%2d worstClearance=%5.1f minEdge=%5.0f alarms=%d cpu=%dms %s", seed, hp[0],
+				forfeited[0] ? " FORFEIT(" + sim.forfeitReason(0) + ")" : "", probe.goalsReached, probe.worstClearance,
+				minEdge[0], probe.alarms, sim.controllerCpuNanos(0) / 1_000_000L,
+				hp[0] < config.startingHp() || forfeited[0] ? "<<<<<" : "");
+	}
+
+	// ── Series ───────────────────────────────────────────────────────
+
+	static void series(ResolvedController a, ResolvedController b, int games, long masterSeed, int threads,
+			int minutes, boolean limits, boolean verbose) throws Exception {
+		var rng = new SplittableRandom(masterSeed);
+		long[] seeds = new long[games];
+		for (int i = 0; i < games; i++) {
+			seeds[i] = rng.nextLong();
+		}
+		long t0 = System.currentTimeMillis();
+		var results = new ArrayList<Game>();
+		try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
+			var futures = new ArrayList<Future<Game>>();
+			for (int i = 0; i < games; i++) {
+				final int n = i + 1;
+				final long s = seeds[i];
+				futures.add(pool.submit(() -> play(n, s, n % 2 == 0, a, b, minutes, limits, 0, false)));
+			}
+			for (var f : futures) {
+				results.add(f.get());
+			}
+		}
+		int w = 0, l = 0, d = 0;
+		for (var g : results) {
+			if (verbose || g.winner != 1) {
+				OUT.println(g.summaryLine());
+			}
+			if (g.winner == 1) {
+				w++;
+			} else if (g.winner == -1) {
+				l++;
+			} else {
+				d++;
+			}
+		}
+		var sa = new SideStats();
+		var sb = new SideStats();
+		long cpuMax = 0;
+		double cpuSum = 0;
+		double winTime = 0;
+		for (var g : results) {
+			sa.add(g.side[0]);
+			sb.add(g.side[1]);
+			cpuMax = Math.max(cpuMax, g.side[0].cpuMs);
+			cpuSum += g.side[0].cpuMs;
+			if (g.winner == 1) {
+				winTime += g.ticks / 50.0;
+			}
+		}
+		OUT.printf(Locale.ROOT, "RESULT %s vs %s: %d-%d-%d (W-L-D) of %d  win%%=%.1f  avgWinTime=%.0fs  wall=%.0fs%n",
+				a.displayName(), b.displayName(), w, l, d, games, 100.0 * w / games, w > 0 ? winTime / w : 0,
+				(System.currentTimeMillis() - t0) / 1000.0);
+		OUT.printf(Locale.ROOT, "  %-10s %s  cpuAvg=%.0fms cpuMax=%dms%n", a.shortName(), sa, cpuSum / games, cpuMax);
+		OUT.printf(Locale.ROOT, "  %-10s %s%n", b.shortName(), sb);
+	}
+
+	static final class SideStats {
+		int fired, hits, deathsTorpedo, deathsOther, forfeits, otherDamage;
+		double hitRangeSum, missRangeSum;
+		int missCount;
+
+		void add(Side s) {
+			fired += s.fired;
+			hits += s.hits;
+			hitRangeSum += s.hitRangeSum;
+			missRangeSum += s.missRangeSum;
+			missCount += s.missCount;
+			otherDamage += s.otherDamage;
+			if (s.forfeit != null) {
+				forfeits++;
+			} else if (s.dead) {
+				if (s.killedByTorpedo) {
+					deathsTorpedo++;
+				} else {
+					deathsOther++;
+				}
+			}
+		}
+
+		@Override
+		public String toString() {
+			return String.format(Locale.ROOT,
+					"fired=%d hits=%d (%.0f%%) hitRange=%.0f missRange=%.0f | died: torpedo=%d other=%d forfeit=%d"
+							+ " | nonTorpedoDmg=%d",
+					fired, hits, fired > 0 ? 100.0 * hits / fired : 0, hits > 0 ? hitRangeSum / hits : 0,
+					missCount > 0 ? missRangeSum / missCount : 0, deathsTorpedo, deathsOther, forfeits, otherDamage);
+		}
+	}
+
+	// ── One game ─────────────────────────────────────────────────────
+
+	static final class Side {
+		String name;
+		int fired, hits, missCount, otherDamage, hp;
+		double hitRangeSum, missRangeSum;
+		boolean dead, killedByTorpedo;
+		String forfeit;
+		long cpuMs;
+		String deathNote = "";
+	}
+
+	static final class Game {
+		int number;
+		long seed;
+		boolean swapped;
+		int winner; // 1 = a, -1 = b, 0 = draw
+		String reason;
+		long ticks;
+		Side[] side = {new Side(), new Side()};
+
+		String summaryLine() {
+			String outcome = winner > 0 ? "WIN " : winner < 0 ? "LOSS" : "DRAW";
+			return String.format(Locale.ROOT,
+					"#%02d %016x %s %s %-7s %5ds  hp %4d/%4d  fired %d/%d hits %d/%d  cpu %dms  %s%s", number, seed,
+					swapped ? "swp" : "   ", outcome, reason, ticks / 50, side[0].hp, side[1].hp, side[0].fired,
+					side[1].fired, side[0].hits, side[1].hits, side[0].cpuMs,
+					side[0].forfeit != null ? "A-FORFEIT(" + side[0].forfeit + ") " : "",
+					(side[0].deathNote + " " + side[1].deathNote).trim());
+		}
+	}
+
+	static final class TorpTrack {
+		int id, owner;
+		long launchTick;
+		double launchRange, minRange = Double.MAX_VALUE, speedSum, launchOffBow;
+		long samples;
+		int pings;
+		long firstPingTick = -1;
+		double targetSpeedAtLaunch;
+	}
+
+	static Game play(int number, long seed, boolean swap, ResolvedController a, ResolvedController b, int minutes,
+			boolean limits, int everySeconds, boolean trace) {
+		var slot0 = swap ? b : a;
+		var slot1 = swap ? a : b;
+		MatchConfig config = MatchConfig.withDefaults(seed).withMatchDurationTicks(minutes * 60 * 50);
+		GeneratedWorld world = new WorldGenerator().generate(config);
+		var sim = new SimulationLoop();
+		sim.setSpeedMultiplier(1e9);
+		if (limits) {
+			sim.setControllerLimits(ControllerLimits.leagueDefaults());
+		}
+		List<SubmarineController> controllers = List.of(slot0.factory().get(), slot1.factory().get());
+		List<VehicleConfig> vehicles = List.of(slot0.vehicleConfig(), slot1.vehicleConfig());
+
+		var game = new Game();
+		game.number = number;
+		game.seed = seed;
+		game.swapped = swap;
+		// index 0 = controller a, index 1 = controller b
+		int[] slotOf = swap ? new int[] {1, 0} : new int[] {0, 1};
+		int[] sideOfSlot = swap ? new int[] {1, 0} : new int[] {0, 1};
+		game.side[0].name = a.shortName();
+		game.side[1].name = b.shortName();
+		String[] tag = {swap ? "B" : "A", swap ? "A" : "B"};
+
+		if (trace) {
+			OUT.printf(Locale.ROOT, "TRACE seed=%016x  A=%s (slot %d)  B=%s (slot %d)%n", seed, a.displayName(),
+					slotOf[0], b.displayName(), slotOf[1]);
+			for (var layer : world.thermalLayers()) {
+				OUT.printf(Locale.ROOT, "  thermal layer core=%.0f top=%.0f bottom=%.0f dT=%.1f%n", layer.depth(),
+						layer.top(), layer.bottom(), layer.gradient());
+			}
+			for (int i = 0; i < world.spawnPoints().size(); i++) {
+				Vec3 s = world.spawnPoints().get(i);
+				OUT.printf(Locale.ROOT, "  spawn slot %d (%s): (%.0f, %.0f, %.0f) floor=%.0f%n", i, tag[i], s.x(), s.y(),
+						s.z(), world.terrain().elevationAt(s.x(), s.y()));
+			}
+		}
+
+		var listener = new SimulationListener() {
+			final Map<Integer, TorpTrack> tracks = new HashMap<>();
+			final int[] lastHp = {config.startingHp(), config.startingHp()};
+			final Map<String, Integer>[] statusTicks = newMaps();
+			final int[] pings = new int[2];
+			final long[] lastPingTick = {-1, -1};
+
+			@SuppressWarnings("unchecked")
+			private Map<String, Integer>[] newMaps() {
+				return new Map[] {new TreeMap<String, Integer>(), new TreeMap<String, Integer>()};
+			}
+
+			@Override
+			public void onTick(long tick, List<SubmarineSnapshot> subs, List<TorpedoSnapshot> torps) {
+				for (var s : subs) {
+					String st = s.status() == null ? "" : s.status().replaceAll("[-+]?[0-9]*\\.?[0-9]+", "#");
+					statusTicks[s.id()].merge(st, 1, Integer::sum);
+					if (s.pingRequested()) {
+						pings[s.id()]++;
+						if (trace && (lastPingTick[s.id()] < 0 || tick - lastPingTick[s.id()] > 1500)) {
+							OUT.printf(Locale.ROOT, "[%5.0fs] %s PING (first in a while) range=%.0f%n", tick / 50.0,
+									tag[s.id()], range(subs));
+						}
+						lastPingTick[s.id()] = tick;
+					}
+				}
+				for (var t : torps) {
+					var tr = tracks.get(t.id());
+					var target = subs.get(1 - t.ownerId());
+					var owner = subs.get(t.ownerId());
+					double r = dist(t.pose().position(), target.pose().position());
+					if (tr == null) {
+						tr = new TorpTrack();
+						tr.id = t.id();
+						tr.owner = t.ownerId();
+						tr.launchTick = tick;
+						tr.launchRange = dist(owner.pose().position(), target.pose().position());
+						double brg = Math.atan2(target.pose().position().x() - owner.pose().position().x(),
+								target.pose().position().y() - owner.pose().position().y());
+						tr.launchOffBow = Math.toDegrees(Math.abs(wrap(brg - owner.pose().heading())));
+						tr.targetSpeedAtLaunch = target.speed();
+						tracks.put(t.id(), tr);
+						game.side[sideOfSlot[t.ownerId()]].fired++;
+						if (trace) {
+							OUT.printf(Locale.ROOT,
+									"[%5.0fs] %s LAUNCH torp %d  range=%.0f offBow=%.0fdeg targetSpd=%.1f ownSpd=%.1f"
+											+ " ownZ=%.0f tgtZ=%.0f status='%s'%n",
+									tick / 50.0, tag[t.ownerId()], t.id(), tr.launchRange, tr.launchOffBow,
+									target.speed(), owner.speed(), owner.pose().position().z(),
+									target.pose().position().z(), owner.status());
+						}
+					}
+					tr.minRange = Math.min(tr.minRange, r);
+					tr.speedSum += t.speed();
+					tr.samples++;
+					if (t.pingRequested()) {
+						tr.pings++;
+						if (tr.firstPingTick < 0) {
+							tr.firstPingTick = tick;
+						}
+					}
+					if (!t.alive()) {
+						// Final snapshot of this torpedo.
+						double hull = HullGeometry.bowDistanceToHull(t, target);
+						double ownHull = HullGeometry.bowDistanceToHull(t, owner);
+						int dmg = lastHp[target.id()] - target.hp();
+						int ownDmg = lastHp[owner.id()] - owner.hp();
+						var side = game.side[sideOfSlot[t.ownerId()]];
+						boolean hit = t.detonated() && dmg > 0;
+						if (hit) {
+							side.hits++;
+							side.hitRangeSum += tr.launchRange;
+							if (target.hp() <= 0) {
+								game.side[sideOfSlot[target.id()]].killedByTorpedo = true;
+							}
+						} else {
+							side.missCount++;
+							side.missRangeSum += tr.launchRange;
+						}
+						if (t.detonated() && ownDmg > 0 && owner.hp() <= 0) {
+							game.side[sideOfSlot[owner.id()]].killedByTorpedo = true;
+							game.side[sideOfSlot[owner.id()]].deathNote = "(own torpedo)";
+						}
+						if (trace) {
+							OUT.printf(Locale.ROOT,
+									"[%5.0fs] %s TORP %d END %s after %.0fs  launchRange=%.0f minRange=%.0f hullDist=%.1f"
+											+ " dmg=%d ownDmg=%d(ownHull %.0f) avgSpd=%.1f pings=%d firstPing=+%.0fs fuel=%.0f"
+											+ " z=%.0f floor=%.0f%n",
+									tick / 50.0, tag[t.ownerId()], t.id(),
+									t.detonated() ? (hit ? "HIT" : "DETONATED-MISS") : "LOST",
+									(tick - tr.launchTick) / 50.0, tr.launchRange, tr.minRange, hull, dmg, ownDmg, ownHull,
+									tr.speedSum / Math.max(1, tr.samples), tr.pings,
+									tr.firstPingTick < 0 ? -1 : (tr.firstPingTick - tr.launchTick) / 50.0,
+									t.fuelRemaining(), t.pose().position().z(),
+									world.terrain().elevationAt(t.pose().position().x(), t.pose().position().y()));
+						}
+					}
+				}
+				// Damage not explained by a torpedo detonating this tick.
+				boolean anyDetonation = false;
+				for (var t : torps) {
+					if (t.detonated()) {
+						anyDetonation = true;
+					}
+				}
+				for (var s : subs) {
+					int lost = lastHp[s.id()] - s.hp();
+					if (lost > 0 && !anyDetonation) {
+						var side = game.side[sideOfSlot[s.id()]];
+						side.otherDamage += lost;
+						double floor = world.terrain().elevationAt(s.pose().position().x(), s.pose().position().y());
+						if (trace && (lost >= 5 || s.hp() <= 0)) {
+							OUT.printf(Locale.ROOT, "[%5.0fs] %s NON-TORPEDO DAMAGE %d (hp %d) z=%.0f floor=%.0f spd=%.1f%n",
+									tick / 50.0, tag[s.id()], lost, s.hp(), s.pose().position().z(), floor, s.speed());
+						}
+						if (s.hp() <= 0) {
+							side.deathNote = String.format(Locale.ROOT, "(%s died: z=%.0f floor=%.0f)", side.name,
+									s.pose().position().z(), floor);
+						}
+					}
+					lastHp[s.id()] = s.hp();
+				}
+				if (trace && everySeconds > 0 && tick % (everySeconds * 50L) == 0) {
+					var sb = new StringBuilder();
+					sb.append(String.format(Locale.ROOT, "[%5.0fs] R=%5.0f", tick / 50.0, range(subs)));
+					for (int side = 0; side < 2; side++) {
+						var s = subs.get(slotOf[side]);
+						var p = s.pose().position();
+						var other = subs.get(1 - s.id()).pose().position();
+						double brg = Math.atan2(other.x() - p.x(), other.y() - p.y());
+						String est = "";
+						if (!s.contactEstimates().isEmpty()) {
+							var ce = s.contactEstimates().getFirst();
+							est = String.format(Locale.ROOT, " estErr=%.0f(n=%d)", Math.hypot(ce.x() - other.x(), ce.y() - other.y()),
+									s.contactEstimates().size());
+						}
+						sb.append(String.format(Locale.ROOT,
+								" | %s (%5.0f,%5.0f,%4.0f) fl=%4.0f h=%03.0f rel=%+04.0f v=%4.1f SL=%3.0f hp=%4d t=%d%s%s '%s'",
+								side == 0 ? "A" : "B", p.x(), p.y(), p.z(), world.terrain().elevationAt(p.x(), p.y()),
+								Math.toDegrees(s.pose().heading()), Math.toDegrees(wrap(brg - s.pose().heading())),
+								s.speed(), s.sourceLevelDb(), s.hp(), s.torpedoesRemaining(),
+								s.firingSolution() != null ? " FS" : "", est, s.status()));
+					}
+					OUT.println(sb);
+				}
+			}
+
+			@Override
+			public void onMatchEnd() {
+				if (trace) {
+					for (int side = 0; side < 2; side++) {
+						int slot = slotOf[side];
+						OUT.printf(Locale.ROOT, "STATUS HISTOGRAM %s (%s), pings=%d:%n", side == 0 ? "A" : "B",
+								game.side[side].name, pings[slot]);
+						statusTicks[slot].entrySet().stream().sorted((x, y) -> y.getValue() - x.getValue()).limit(25)
+								.forEach(e -> OUT.printf(Locale.ROOT, "    %7.0fs  %s%n", e.getValue() / 50.0, e.getKey()));
+					}
+				}
+			}
+		};
+
+		sim.run(world, controllers, vehicles, listener);
+		var result = sim.matchOutcome();
+		if (result == null) {
+			throw new IllegalStateException("No outcome");
+		}
+		game.ticks = result.tick() + 1;
+		boolean[] alive = new boolean[2];
+		for (int side = 0; side < 2; side++) {
+			var r = result.controllers().get(slotOf[side]);
+			alive[side] = r.hp() > 0 && !r.forfeited();
+			game.side[side].hp = Math.max(0, r.hp());
+			game.side[side].dead = r.hp() <= 0;
+			game.side[side].cpuMs = r.cpuNanos() / 1_000_000L;
+			if (r.forfeited()) {
+				game.side[side].forfeit = r.forfeitReason().isEmpty() ? "forfeited" : r.forfeitReason();
+			}
+		}
+		if (alive[0] && !alive[1]) {
+			game.winner = 1;
+			game.reason = game.side[1].forfeit != null ? "FORFEIT" : "KILL";
+		} else if (alive[1] && !alive[0]) {
+			game.winner = -1;
+			game.reason = game.side[0].forfeit != null ? "FORFEIT" : "KILL";
+		} else if (!alive[0] && !alive[1]) {
+			game.reason = "MUTUAL";
+		} else {
+			game.reason = "TIMEOUT";
+		}
+		return game;
+	}
+
+	private static double range(List<SubmarineSnapshot> subs) {
+		return dist(subs.get(0).pose().position(), subs.get(1).pose().position());
+	}
+
+	private static double dist(Vec3 a, Vec3 b) {
+		return a.distanceTo(b);
+	}
+
+	private static double wrap(double a) {
+		while (a > Math.PI) {
+			a -= 2 * Math.PI;
+		}
+		while (a < -Math.PI) {
+			a += 2 * Math.PI;
+		}
+		return a;
+	}
+}
