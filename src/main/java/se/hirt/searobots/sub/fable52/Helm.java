@@ -238,9 +238,11 @@ final class Helm {
 				if (aheadClear) {
 					reverseTarget = 2.5;
 				} else {
+					// Back out the way we came if there is room; creep ahead only into water that is
+					// clear at this depth; otherwise hold and let the boat rise first.
 					double ahead = clearDistance(pos, pose.heading(), 300);
 					double astern = clearDistance(pos, pose.heading() + Math.PI, 300);
-					reverseTarget = astern > ahead + 20 ? -2.6 : 2.0;
+					reverseTarget = astern >= 100 ? -2.6 : (ahead >= 150 ? 2.0 : 0.0);
 				}
 				heading = backOffHeading;
 			}
@@ -407,21 +409,26 @@ final class Helm {
 	/** How far a straight run from the boat stays clear of shoal water and the boundary. */
 	private double clearDistance(Vec3 pos, double heading, double limit) {
 		double sx = Math.sin(heading), sy = Math.cos(heading);
+		double tooHigh = Math.min(IMPASSABLE_FLOOR - 4, pos.z() - 24);
 		for (double d = 25; d <= limit; d += 25) {
 			double px = pos.x() + sx * d, py = pos.y() + sy * d;
-			if (terrain.elevationAt(px, py) > IMPASSABLE_FLOOR - 4 || area.distanceToBoundary(px, py) < 110) {
+			if (terrain.elevationAt(px, py) > tooHigh || area.distanceToBoundary(px, py) < 110) {
 				return d - 25;
 			}
 		}
 		return limit;
 	}
 
-	/** True if a straight run from the boat meets neither shoal water nor the boundary. */
+	/**
+	 * True if a straight run from the boat, at the depth it is at now, meets neither the sea floor
+	 * nor the boundary. For a deep boat a rising slope is as much in the way as a shoal.
+	 */
 	private boolean hazardFree(Vec3 pos, double heading, double distance) {
 		double sx = Math.sin(heading), sy = Math.cos(heading);
+		double tooHigh = Math.min(IMPASSABLE_FLOOR - 4, pos.z() - 24);
 		for (double d = 0; d <= distance; d += 25) {
 			double px = pos.x() + sx * d, py = pos.y() + sy * d;
-			if (terrain.elevationAt(px, py) > IMPASSABLE_FLOOR - 4 || area.distanceToBoundary(px, py) < 110) {
+			if (terrain.elevationAt(px, py) > tooHigh || area.distanceToBoundary(px, py) < 110) {
 				return false;
 			}
 		}

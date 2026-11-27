@@ -13,15 +13,18 @@ submarine plugs into the API and for the build files; none of its tactics code i
 ## Results
 
 Head-to-head against the four built-in submarines, league rules (alternating spawns, CPU
-guardrails, two-hour limit). Lab runs of 96 matches per opponent on maps the tuning never saw,
-plus the official `mvn -Pmatch33` profile:
+guardrails, two-hour limit). Lab runs of 96 matches per opponent on a map set the tuning never
+saw (`--seed 20261127`), plus the official `mvn -Pmatch33` profile:
 
 | Opponent | Lab, 96 matches (W–L–D) | `-Pmatch33 -Dseed=202612` (W–L–D) |
 |---|---|---|
-| Codex   | 92–0–4  | 33–0–0 |
-| Claude  | 91–0–5  | 30–0–3 |
-| Default | 92–0–3 (one match dropped, see below) | not run |
-| Gemini  | between 62–15–16 and 72–15–7 depending on the map set | 26–5–2 |
+| Default | 94–0–2  | not run |
+| Codex   | 93–1–2  | 33–0–0 |
+| Claude  | 88–1–7  | 31–0–2 |
+| Gemini  | 67–17–11 (one match dropped, see below) | 24–6–3 |
+
+Across the map sets used during development the Gemini result ranged from about 66 % to 78 % wins,
+so read that row as "roughly seventy percent".
 
 Gemini is by far the strongest built-in (it beats Codex and Claude about 11–0 in a dozen games)
 and is the one opponent that still wins a meaningful share. Controller CPU use is around 0.5–2 s
@@ -61,8 +64,10 @@ From these the boat's behaviour follows:
 3. **Read the opponent.** One that pings constantly is a hunter and gets shot at long range. A
    silent one probably runs from torpedoes (and snipes): against it the boat holds fire for shots
    it cannot outrun, counts its launches, and once its magazine is empty walks up and finishes
-   it. If it gets into a position from which the boat could not escape a shot, the boat fires a
-   single torpedo first: a runner breaks off and runs, and the tables are turned.
+   it. Against such an opponent the boat keeps closing obliquely rather than holding off (the
+   lab showed that this is when its torpedoes almost never connect), and if it gets into a position
+   from which the boat could not escape a shot, the boat fires a single torpedo first: a runner
+   breaks off and runs, and the tables are turned.
 4. **Two hits kill, so make hits count.** Blast damage falls off with distance from the hull.
    The proximity fuse is set to the largest radius at which two hits are still certain to sink
    (about 17 m), which forgives a near miss; once the enemy is hurt, the largest radius that
