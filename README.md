@@ -26,8 +26,8 @@ saw (`--seed 20261127`), plus the official `mvn -Pmatch33` profile:
 Across the map sets used during development the Gemini result ranged from about 66 % to 78 % wins,
 so read that row as "roughly seventy percent".
 
-Gemini is by far the strongest built-in (it beats Codex and Claude about 11–0 in a dozen games)
-and is the one opponent that still wins a meaningful share. Controller CPU use is around 0.5–2 s
+Gemini is by far the strongest built-in (in 24 lab matches each it beat Claude 22–0 with two draws
+and Codex 23–1) and is the one opponent that still wins a meaningful share. Controller CPU use is around 0.5–2 s
 per match, peaking under 4 s against the league cap of 30 s.
 
 One caveat about measuring: the engine's hull-on-seabed contact solver occasionally slows to a
