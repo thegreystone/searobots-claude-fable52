@@ -1,4 +1,4 @@
-name: Submarine CI
+name: Fable 5.2 Submarine CI
 
 on:
   push:

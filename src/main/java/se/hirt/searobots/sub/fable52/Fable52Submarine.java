@@ -101,7 +101,6 @@ public class Fable52Submarine implements SubmarineController {
 	private final double[] runX = new double[48];
 	private final double[] runY = new double[48];
 	private int runLength, runIndex;
-	private boolean runIsEscape;
 	private long searchUntil;
 	private boolean pingedLastTick;
 	private boolean gotEnemyEcho;
@@ -232,7 +231,7 @@ public class Fable52Submarine implements SubmarineController {
 			}
 			if (tick - evadePlannedTick >= 100 || !evadeRouteValid) {
 				boolean ok = escape.plan(x, y, heading, speed, hpRatio, 0.5, 5.0);
-				adoptRoute(true);
+				adoptRoute();
 				evadeRouteValid = true;
 				evadePlannedTick = tick;
 				if (!ok) {
@@ -520,7 +519,7 @@ public class Fable52Submarine implements SubmarineController {
 		escape.addThreat(ex, ey, Engagement.TORPEDO_FUEL, 23.2);
 		escapable = escape.plan(x, y, heading, speed, hpRatio, 5.0, 8.0);
 		if (!escapable) {
-			adoptRoute(false);
+			adoptRoute();
 		}
 	}
 
@@ -568,7 +567,7 @@ public class Fable52Submarine implements SubmarineController {
 		if (torpedoes <= 0 || salvoLeft > 0 || enemyDead || enemy.fixAgeSeconds(tick) > 6.0 || range < 450) {
 			return;
 		}
-		boolean cornered = !escapable && !enemyDry && torpedoes > 2;
+		boolean cornered = !escapable && !enemyDry && torpedoes > 2 && (enemyRuns == 1 || enemyLaunched + salvoPeak > 0);
 		if ((tick - lastLaunchTick) < 50 * 20 || (ownWeaponsRunning() > 0 && !cornered)
 				|| (cornered && (tick - lastLaunchTick) < 50 * 90)) {
 			return; // let the weapons already running do their work first
@@ -579,7 +578,7 @@ public class Fable52Submarine implements SubmarineController {
 		cornerShot = false;
 		if (canKill) {
 			fire = true; // he cannot outrun it
-		} else if (!escapable && !enemyDry && torpedoes > 2) {
+		} else if (!escapable && !enemyDry && torpedoes > 2 && (enemyRuns == 1 || enemyLaunched + salvoPeak > 0)) {
 			// He is where we could not run out his shot. A weapon in the water makes him break
 			// off and run instead: one torpedo spent to turn the tables.
 			fire = true;
@@ -686,12 +685,11 @@ public class Fable52Submarine implements SubmarineController {
 	}
 
 	/** Takes over the escape planner's route as the one to run. */
-	private void adoptRoute(boolean isEscape) {
+	private void adoptRoute() {
 		runLength = Math.min(escape.routeLength, runX.length);
 		System.arraycopy(escape.routeX, 0, runX, 0, runLength);
 		System.arraycopy(escape.routeY, 0, runY, 0, runLength);
 		runIndex = 0;
-		runIsEscape = isEscape;
 	}
 
 	/** Heading along the adopted route, or NaN if there is none (left). */

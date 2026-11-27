@@ -285,7 +285,7 @@ public class Fable52Torpedo implements TorpedoController {
 		SonarContact tBest = null, oBest = null;
 		double tCost = Double.MAX_VALUE, oCost = Double.MAX_VALUE;
 		double tBestX = 0, tBestY = 0, oBestX = 0, oBestY = 0;
-		double tAsOwner = Double.MAX_VALUE, oAsTarget = Double.MAX_VALUE;
+		double tAsOwner = Double.MAX_VALUE;
 		for (SonarContact c : returns) {
 			if (!(c.range() > 0)) {
 				continue;
@@ -313,7 +313,6 @@ public class Fable52Torpedo implements TorpedoController {
 				oBest = c;
 				oBestX = echoX;
 				oBestY = echoY;
-				oAsTarget = asT;
 			}
 		}
 		if (tBest != null && tBest == oBest) {

@@ -5,8 +5,7 @@ package se.hirt.searobots.sub.fable52;
  * every weapon; following them from ping to ping tells which are closing.
  * <p>
  * Whose weapon it is matters less than where it is going: the boat's own torpedoes cannot tell
- * friend from foe either. Anything that closes fast and has the legs to arrive is a threat. A
- * weapon that first shows up right beside the enemy is counted against his magazine.
+ * friend from foe either. Anything that closes fast and has the legs to arrive is a threat.
  */
 final class WeaponPlot {
 
@@ -45,8 +44,6 @@ final class WeaponPlot {
 	private int pendingOwn;
 	private long ownLaunchTick = -1;
 	private double ownLaunchX, ownLaunchY;
-	/** Hostile weapons ever seen (to count down the enemy's magazine). */
-	int hostileSeen;
 
 	WeaponPlot() {
 		for (int i = 0; i < MAX; i++) {
@@ -60,7 +57,6 @@ final class WeaponPlot {
 		}
 		pendingOwn = 0;
 		ownLaunchTick = -1;
-		hostileSeen = 0;
 	}
 
 	void noteOwnLaunch(long tick, double x, double y) {
@@ -144,7 +140,6 @@ final class WeaponPlot {
 			slot.launchTick = ownLaunchTick;
 		} else if (enemyKnown && Math.hypot(x - enemyX, y - enemyY) < 420) {
 			slot.hostile = true;
-			hostileSeen++;
 		}
 	}
 
@@ -183,9 +178,7 @@ final class WeaponPlot {
 		} else {
 			coming = w.closing > 4 || (w.hostile && w.sightings < 3 && w.closing > -4);
 			if (coming && !w.hostile && w.closing > 10 && range < 3000) {
-				// Not seen leaving his tubes, but it is plainly his: count it against his magazine.
-				w.hostile = true;
-				hostileSeen++;
+				w.hostile = true; // not seen leaving his tubes, but it is plainly his
 			}
 		}
 		return coming && range <= 23.0 * Math.max(fuel, 0) + 300;
