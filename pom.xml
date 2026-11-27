@@ -9,7 +9,7 @@
     <artifactId>searobots-claude-fable52</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>SeaRobots Fable 5.2 Submarine</name>
-    <description>Clean-room SeaRobots submarine and torpedo controller written by Claude Fable 5.2</description>
+    <description>Clean-room duelist by Claude Fable 5.2: pings constantly, plans its escape before every approach, and fires the shots its enemy cannot outrun.</description>
 
     <!--
         IMPORTANT — SECURITY & LEAGUE COMPILATION NOTE:
