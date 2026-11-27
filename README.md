@@ -28,7 +28,7 @@ so read that row as "roughly seventy percent".
 
 Gemini is by far the strongest built-in (it beats Codex and Claude about 11–0 in a dozen games)
 and is the one opponent that still wins a meaningful share. Controller CPU use is around 0.5–2 s
-per match, peaking near 3 s against the league cap of 30 s.
+per match, peaking under 4 s against the league cap of 30 s.
 
 One caveat about measuring: the engine's hull-on-seabed contact solver occasionally slows to a
 crawl when a submarine runs itself onto a beach (the Default submarine does this now and then).
