@@ -19,6 +19,8 @@ final class SeaChart {
 	/** Never plan closer than this to the battle area boundary. */
 	static final double BOUNDARY_BLOCK = 320.0;
 	static final double BOUNDARY_SOFT = 900.0;
+	/** Water with less sea room than this gets a planning penalty. */
+	static final double TIGHT_ROOM = 600.0;
 
 	final TerrainMap terrain;
 	final BattleArea area;
@@ -32,6 +34,8 @@ final class SeaChart {
 	private final float[] cost;
 	/** 0 = blocked, otherwise the id of the connected body of passable water the cell belongs to. */
 	private final int[] region;
+	/** Distance (m) from each cell to the nearest shoal, island or edge of the battle area. */
+	private final float[] room;
 
 	// A* scratch (reused; stamps avoid clearing)
 	private final float[] g;
@@ -60,6 +64,7 @@ final class SeaChart {
 		ceiling = new float[total];
 		cost = new float[total];
 		region = new int[total];
+		room = new float[total];
 		g = new float[total];
 		parent = new int[total];
 		stamp = new int[total];
@@ -129,6 +134,63 @@ final class SeaChart {
 				cost[i] = (float) k;
 			}
 		}
+		// Sea room: distance to the nearest water a boat cannot use (two-pass chamfer transform).
+		float far = 1e6f;
+		for (int r = 0; r < n; r++) {
+			for (int c = 0; c < n; c++) {
+				int i = r * n + c;
+				boolean hazard = ownCeiling[i] > BLOCK_FLOOR || area.distanceToBoundary(cellX(c), cellY(r)) < 0;
+				room[i] = hazard ? 0 : far;
+			}
+		}
+		float straight = (float) CELL, diagonal = (float) (CELL * 1.4142);
+		for (int r = 0; r < n; r++) {
+			for (int c = 0; c < n; c++) {
+				int i = r * n + c;
+				float d = room[i];
+				if (c > 0) {
+					d = Math.min(d, room[i - 1] + straight);
+				}
+				if (r > 0) {
+					d = Math.min(d, room[i - n] + straight);
+					if (c > 0) {
+						d = Math.min(d, room[i - n - 1] + diagonal);
+					}
+					if (c < n - 1) {
+						d = Math.min(d, room[i - n + 1] + diagonal);
+					}
+				}
+				room[i] = d;
+			}
+		}
+		for (int r = n - 1; r >= 0; r--) {
+			for (int c = n - 1; c >= 0; c--) {
+				int i = r * n + c;
+				float d = room[i];
+				if (c < n - 1) {
+					d = Math.min(d, room[i + 1] + straight);
+				}
+				if (r < n - 1) {
+					d = Math.min(d, room[i + n] + straight);
+					if (c < n - 1) {
+						d = Math.min(d, room[i + n + 1] + diagonal);
+					}
+					if (c > 0) {
+						d = Math.min(d, room[i + n - 1] + diagonal);
+					}
+				}
+				// The battle area boundary is exact; the grid only knows it to a cell.
+				room[i] = (float) Math.min(d, Math.max(0, area.distanceToBoundary(cellX(c), cellY(r))));
+			}
+		}
+		// Tight water is unattractive to plan through even where it is deep.
+		for (int i = 0; i < n * n; i++) {
+			if (cost[i] > 0 && room[i] < TIGHT_ROOM) {
+				double f = 1.0 - room[i] / TIGHT_ROOM;
+				cost[i] += (float) (1.2 * f * f);
+			}
+		}
+
 		// Label connected bodies of passable water (8-connected, like the planner).
 		int next = 0;
 		for (int i = 0; i < n * n; i++) {
@@ -157,6 +219,12 @@ final class SeaChart {
 				}
 			}
 		}
+	}
+
+	/** Distance (m) from the position to the nearest shoal, island or edge of the battle area. */
+	double roomAt(double x, double y) {
+		int c = col(x), r = row(y);
+		return inGrid(c, r) ? room[r * n + c] : 0;
 	}
 
 	/** Id of the body of water at the position, or 0 if it is not passable. */

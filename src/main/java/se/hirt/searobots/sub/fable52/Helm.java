@@ -156,10 +156,24 @@ final class Helm {
 		double driftX = ground.x() - state.velocity().linear().x();
 		double driftY = ground.y() - state.velocity().linear().y();
 
-		if (area.distanceToBoundary(pos.x(), pos.y()) < 170) {
-			// Last resort; the path prediction below normally keeps the boat well inside.
-			heading = Geo.bearing(pos.x(), pos.y(), 0, 0);
-			speed = Math.max(speed, 4.0);
+		// Leaving the battle area forfeits the match, so near the edge nothing is allowed to point
+		// the boat outward: the closer to the edge, the more the heading is bent inward. A boat
+		// needs a few hundred metres to turn, so this starts well before the edge.
+		double edge = area.distanceToBoundary(pos.x(), pos.y());
+		if (edge < 520) {
+			double gx = area.distanceToBoundary(pos.x() + 10, pos.y()) - area.distanceToBoundary(pos.x() - 10, pos.y());
+			double gy = area.distanceToBoundary(pos.x(), pos.y() + 10) - area.distanceToBoundary(pos.x(), pos.y() - 10);
+			if (Math.hypot(gx, gy) > 1e-6) {
+				double inward = Math.atan2(gx, gy);
+				double allowed = Math.toRadians(edge < 260 ? 55 : 55 + (edge - 260) / 260.0 * 50);
+				double off = Geo.wrap(heading - inward);
+				if (Math.abs(off) > allowed) {
+					heading = Geo.norm(inward + Math.signum(off) * allowed);
+				}
+				if (edge < 260) {
+					speed = Math.max(speed, 6.0);
+				}
+			}
 		}
 
 		// ── Look where the boat is about to go ──
@@ -221,8 +235,13 @@ final class Helm {
 				backingOff = false;
 				predictedFor = Double.NaN;
 			} else {
-				boolean asternClear = hazardFree(pos, pose.heading() + Math.PI, 150);
-				reverseTarget = asternClear && !aheadClear ? -2.6 : (aheadClear ? 2.5 : 0.0);
+				if (aheadClear) {
+					reverseTarget = 2.5;
+				} else {
+					double ahead = clearDistance(pos, pose.heading(), 300);
+					double astern = clearDistance(pos, pose.heading() + Math.PI, 300);
+					reverseTarget = astern > ahead + 20 ? -2.6 : 2.0;
+				}
 				heading = backOffHeading;
 			}
 		}
@@ -383,6 +402,18 @@ final class Helm {
 		}
 		predCeiling = ceiling;
 		predHazardTime = hazard;
+	}
+
+	/** How far a straight run from the boat stays clear of shoal water and the boundary. */
+	private double clearDistance(Vec3 pos, double heading, double limit) {
+		double sx = Math.sin(heading), sy = Math.cos(heading);
+		for (double d = 25; d <= limit; d += 25) {
+			double px = pos.x() + sx * d, py = pos.y() + sy * d;
+			if (terrain.elevationAt(px, py) > IMPASSABLE_FLOOR - 4 || area.distanceToBoundary(px, py) < 110) {
+				return d - 25;
+			}
+		}
+		return limit;
 	}
 
 	/** True if a straight run from the boat meets neither shoal water nor the boundary. */

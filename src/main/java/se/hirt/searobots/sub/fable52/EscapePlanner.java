@@ -36,6 +36,7 @@ final class EscapePlanner {
 	private final double[] threatReach = new double[MAX_THREATS];
 	private final double[] threatSpeed = new double[MAX_THREATS];
 	private int threats;
+	private double longestFuel;
 
 	// Result of the last plan
 	final double[] routeX = new double[48];
@@ -75,6 +76,7 @@ final class EscapePlanner {
 		threatY[threats] = y;
 		threatSpeed[threats] = speed;
 		threatReach[threats] = speed * Math.max(0, fuelSeconds) + 120.0;
+		longestFuel = threats == 0 ? fuelSeconds : Math.max(longestFuel, fuelSeconds);
 		threats++;
 	}
 
@@ -241,7 +243,9 @@ final class EscapePlanner {
 			return true;
 		}
 		escapeSeconds = time[end];
-		return false;
+		// Not beyond the weapons' reach, but ahead of them all the way until they run dry: that
+		// is an escape too. In a cramped corner of the map it is the only kind there is.
+		return time[end] >= longestFuel - margin - 12.0;
 	}
 
 	private void push(int cell, float key) {

@@ -106,6 +106,8 @@ public class Fable52Submarine implements SubmarineController {
 	private boolean pingedLastTick;
 	private boolean gotEnemyEcho;
 	private boolean urgent;
+	private boolean cornerShot;
+	private double enemyPingBearing;
 	private String mode = "INIT";
 
 	@Override
@@ -192,7 +194,7 @@ public class Fable52Submarine implements SubmarineController {
 		readPassive(in);
 		plot.expire(tick);
 		judgeLastSalvo();
-		if (salvoPeak > 0 && (tick - lastHostileEchoTick) > 50 * 70) {
+		if (salvoPeak > 0 && (tick - lastHostileEchoTick) > 50 * 200) {
 			enemyLaunched += salvoPeak;
 			salvoPeak = 0;
 		}
@@ -267,7 +269,13 @@ public class Fable52Submarine implements SubmarineController {
 				searchUntil = tick + 50 * 150;
 			}
 			wantHeading = lookout.haveGoal ? navigate(lookout.goalX, lookout.goalY) : heading;
-			wantSpeed = enemyDead ? 4.0 : 9.0;
+			wantSpeed = enemyDead ? 4.0 : 12.0;
+			if (!enemyDead && tick - enemyPingTick < 50 * 60 && enemyPings < 6) {
+				// A quiet enemy we cannot see has just pinged: he is lining up a shot. Do not wait for it.
+				mode = "ALARM";
+				wantHeading = clearHeading(enemyPingBearing + Math.PI, 900);
+				wantSpeed = Helm.MAX_SPEED;
+			}
 			// Shallow water sees over ridges that would hide the enemy from a deep boat.
 			wantDepth = SEARCH_DEPTH;
 		} else {
@@ -459,6 +467,7 @@ public class Fable52Submarine implements SubmarineController {
 			if (!weapon && c.signalExcess() > 85 && tick - enemyPingTick > 100) {
 				enemyPings++; // nothing but an active ping is that loud
 				enemyPingTick = tick;
+				enemyPingBearing = c.bearing();
 			}
 			if (weapon) {
 				torps++;
@@ -559,14 +568,22 @@ public class Fable52Submarine implements SubmarineController {
 		if (torpedoes <= 0 || salvoLeft > 0 || enemyDead || enemy.fixAgeSeconds(tick) > 6.0 || range < 450) {
 			return;
 		}
-		if (ownWeaponsRunning() > 0 || (tick - lastLaunchTick) < 50 * 20) {
+		boolean cornered = !escapable && !enemyDry && torpedoes > 2;
+		if ((tick - lastLaunchTick) < 50 * 20 || (ownWeaponsRunning() > 0 && !cornered)
+				|| (cornered && (tick - lastLaunchTick) < 50 * 90)) {
 			return; // let the weapons already running do their work first
 		}
 		// Closing rate: positive when the enemy comes toward us.
 		double closing = -(enemy.vx * Math.sin(bearing) + enemy.vy * Math.cos(bearing));
 		boolean fire;
+		cornerShot = false;
 		if (canKill) {
 			fire = true; // he cannot outrun it
+		} else if (!escapable && !enemyDry && torpedoes > 2) {
+			// He is where we could not run out his shot. A weapon in the water makes him break
+			// off and run instead: one torpedo spent to turn the tables.
+			fire = true;
+			cornerShot = true;
 		} else if (enemyDry) {
 			fire = range < 1100; // no hurry: get close enough that it is certain
 		} else if (enemyRuns == 1) {
@@ -581,7 +598,7 @@ public class Fable52Submarine implements SubmarineController {
 			return;
 		}
 		out.publishFiringSolution(new FiringSolution(ex, ey, enemy.heading(), enemy.speed(), canKill ? 1.0 : 0.6));
-		salvoLeft = Math.min(2, torpedoes);
+		salvoLeft = Math.min(cornerShot && enemyRuns == 1 ? 1 : 2, torpedoes);
 		nextShotTick = tick;
 		hitsAtLastSalvo = ownHits;
 		salvoJudged = false;
@@ -652,6 +669,10 @@ public class Fable52Submarine implements SubmarineController {
 
 	/** The heading closest to {@code preferred} with at least {@code run} metres of open water. */
 	private double clearHeading(double preferred, double run) {
+		if (!chart.passable(x, y) && area.distanceToBoundary(x, y) < SeaChart.BOUNDARY_BLOCK + 60) {
+			// In the margin along the edge of the area nothing looks open: come back in.
+			return Geo.bearing(x, y, 0, 0);
+		}
 		for (int i = 0; i <= 12; i++) {
 			double off = Math.toRadians(15) * i;
 			if (chart.freeRun(x, y, preferred + off * side, run) >= run) {

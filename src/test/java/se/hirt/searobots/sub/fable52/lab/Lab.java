@@ -46,6 +46,29 @@ public final class Lab {
 	private static final Map<Integer, Game> RUNNING = new java.util.concurrent.ConcurrentHashMap<>();
 	private static final long MAX_GAME_WALL_NANOS = 100_000_000_000L;
 	private static boolean TORP_TRACE;
+	private static boolean FLAT;
+	/** Enemy torpedoes fired at A and how many hit, by how much sea room A had when they were fired. */
+	private static final int[] ROOM_SHOTS = new int[5], ROOM_HITS = new int[5];
+	private static final int[] ASPECT_SHOTS = new int[4], ASPECT_HITS = new int[4];
+	private static final int[] SPEED_SHOTS = new int[3], SPEED_HITS = new int[3];
+	private static final int[] RANGE_SHOTS = new int[6], RANGE_HITS = new int[6];
+	private static final Map<String, int[]> MODE_STATS = new TreeMap<>();
+
+	/** Distance from a point to the nearest shoal (floor above -78 m) or to the battle area boundary. */
+	private static double seaRoom(GeneratedWorld world, double x, double y) {
+		double best = world.config().battleArea().distanceToBoundary(x, y);
+		var terrain = world.terrain();
+		for (double r = 50; r < Math.min(best, 2000); r += 50) {
+			int n = Math.max(8, (int) (2 * Math.PI * r / 50));
+			for (int i = 0; i < n; i++) {
+				double a = i * 2 * Math.PI / n;
+				if (terrain.elevationAt(x + Math.sin(a) * r, y + Math.cos(a) * r) > -78) {
+					return r;
+				}
+			}
+		}
+		return Math.min(best, 2000);
+	}
 
 	/**
 	 * The engine's hull-on-seabed contact solver can lock up for minutes inside a single tick.
@@ -112,6 +135,7 @@ public final class Lab {
 			case "--no-limits" -> limits = false;
 			case "--verbose" -> verbose = true;
 			case "--torp" -> TORP_TRACE = true;
+			case "--flat" -> FLAT = true;
 
 			default -> throw new IllegalArgumentException("Unknown argument " + args[i]);
 			}
@@ -296,6 +320,27 @@ public final class Lab {
 				(System.currentTimeMillis() - t0) / 1000.0);
 		OUT.printf(Locale.ROOT, "  %-10s %s  cpuAvg=%.0fms cpuMax=%dms%n", a.shortName(), sa, cpuSum / games, cpuMax);
 		OUT.printf(Locale.ROOT, "  %-10s %s%n", b.shortName(), sb);
+		String[] names = {"<300m", "300-600m", "600-1000m", "1000-1500m", ">1500m"};
+		var room = new StringBuilder("  torpedoes fired at A by A's sea room at launch (hits/fired):");
+		for (int i = 0; i < 5; i++) {
+			room.append(String.format(Locale.ROOT, "  %s %d/%d", names[i], ROOM_HITS[i], ROOM_SHOTS[i]));
+		}
+		OUT.println(room);
+		OUT.printf(Locale.ROOT,
+				"  ... by where A's bow pointed (enemy off the bow):  0-45deg %d/%d  45-90deg %d/%d  90-135deg %d/%d  135-180deg %d/%d%n",
+				ASPECT_HITS[0], ASPECT_SHOTS[0], ASPECT_HITS[1], ASPECT_SHOTS[1], ASPECT_HITS[2], ASPECT_SHOTS[2],
+				ASPECT_HITS[3], ASPECT_SHOTS[3]);
+		var modes = new StringBuilder("  ... by what A was doing:");
+		for (var e : MODE_STATS.entrySet()) {
+			modes.append(String.format(Locale.ROOT, "  %s %d/%d", e.getKey(), e.getValue()[1], e.getValue()[0]));
+		}
+		OUT.println(modes);
+		OUT.printf(Locale.ROOT,
+				"  ... by launch range:  <2500 %d/%d  2500-3000 %d/%d  3000-3500 %d/%d  3500-4000 %d/%d  4000-4500 %d/%d  >4500 %d/%d%n",
+				RANGE_HITS[0], RANGE_SHOTS[0], RANGE_HITS[1], RANGE_SHOTS[1], RANGE_HITS[2], RANGE_SHOTS[2], RANGE_HITS[3],
+				RANGE_SHOTS[3], RANGE_HITS[4], RANGE_SHOTS[4], RANGE_HITS[5], RANGE_SHOTS[5]);
+		OUT.printf(Locale.ROOT, "  ... by A's speed:  <6 m/s %d/%d  6-11 m/s %d/%d  >11 m/s %d/%d%n", SPEED_HITS[0],
+				SPEED_SHOTS[0], SPEED_HITS[1], SPEED_SHOTS[1], SPEED_HITS[2], SPEED_SHOTS[2]);
 	}
 
 	static final class SideStats {
@@ -352,6 +397,7 @@ public final class Lab {
 		volatile long lastWall = System.nanoTime();
 		final long startWall = System.nanoTime();
 		volatile boolean finished;
+		final StringBuilder postMortem = new StringBuilder();
 		boolean slow;
 		int winner; // 1 = a, -1 = b, 0 = draw
 		String reason;
@@ -365,7 +411,7 @@ public final class Lab {
 					swapped ? "swp" : "   ", outcome, reason, ticks / 50, side[0].hp, side[1].hp, side[0].fired,
 					side[1].fired, side[0].hits, side[1].hits, side[0].cpuMs,
 					side[0].forfeit != null ? "A-FORFEIT(" + side[0].forfeit + ") " : "",
-					(side[0].deathNote + " " + side[1].deathNote).trim());
+					(side[0].deathNote + " " + side[1].deathNote).trim()) + (winner < 0 ? postMortem : "");
 		}
 	}
 
@@ -377,6 +423,11 @@ public final class Lab {
 		int pings;
 		long firstPingTick = -1;
 		double targetSpeedAtLaunch;
+		double victimSpeed, victimRel, victimX, victimY;
+		String victimStatus;
+		double victimRoom;
+		boolean victimIsA;
+		long evadeTick = -1, fastTick = -1;
 	}
 
 	static Game play(int number, long seed, boolean swap, ResolvedController a, ResolvedController b, int minutes,
@@ -384,7 +435,8 @@ public final class Lab {
 		var slot0 = swap ? b : a;
 		var slot1 = swap ? a : b;
 		MatchConfig config = MatchConfig.withDefaults(seed).withMatchDurationTicks(minutes * 60 * 50);
-		GeneratedWorld world = new WorldGenerator().generate(config);
+		final GeneratedWorld world = FLAT ? flatten(new WorldGenerator().generate(config))
+				: new WorldGenerator().generate(config);
 		var sim = new SimulationLoop();
 		sim.setSpeedMultiplier(1e9);
 		if (limits) {
@@ -468,6 +520,14 @@ public final class Lab {
 						tr.targetSpeedAtLaunch = target.speed();
 						tracks.put(t.id(), tr);
 						game.side[sideOfSlot[t.ownerId()]].fired++;
+						tr.victimSpeed = target.speed();
+						tr.victimRel = Math.toDegrees(wrap(Math.atan2(owner.pose().position().x() - target.pose().position().x(),
+								owner.pose().position().y() - target.pose().position().y()) - target.pose().heading()));
+						tr.victimStatus = target.status();
+						tr.victimRoom = seaRoom(world, target.pose().position().x(), target.pose().position().y());
+						tr.victimIsA = sideOfSlot[target.id()] == 0;
+						tr.victimX = target.pose().position().x();
+						tr.victimY = target.pose().position().y();
 						if (trace) {
 							OUT.printf(Locale.ROOT,
 									"[%5.0fs] %s LAUNCH torp %d  range=%.0f offBow=%.0fdeg targetSpd=%.1f ownSpd=%.1f"
@@ -488,6 +548,12 @@ public final class Lab {
 								t.speed(), Math.toDegrees(t.pose().heading()), Math.toDegrees(t.pose().pitch()),
 								t.fuelRemaining(), r, ownRange, estErr, gp.z(), t.diagEstZ(), t.diagPhase());
 					}
+					if (tr.evadeTick < 0 && target.status() != null && target.status().startsWith("EVADE")) {
+						tr.evadeTick = tick;
+					}
+					if (tr.fastTick < 0 && target.speed() > 13.5 && tick > tr.launchTick + 50) {
+						tr.fastTick = tick;
+					}
 					tr.minRange = Math.min(tr.minRange, r);
 					tr.speedSum += t.speed();
 					tr.samples++;
@@ -505,6 +571,41 @@ public final class Lab {
 						int ownDmg = lastHp[owner.id()] - owner.hp();
 						var side = game.side[sideOfSlot[t.ownerId()]];
 						boolean hit = t.detonated() && dmg > 0;
+						if (tr.victimIsA) {
+							int bucket = tr.victimRoom < 300 ? 0 : tr.victimRoom < 600 ? 1 : tr.victimRoom < 1000 ? 2 : tr.victimRoom < 1500 ? 3 : 4;
+							int aspect = (int) Math.min(3, Math.abs(tr.victimRel) / 45.0);
+							int fast = tr.victimSpeed < 6 ? 0 : tr.victimSpeed < 11 ? 1 : 2;
+							String modeKey = tr.victimStatus == null || tr.victimStatus.isEmpty() ? "?" : tr.victimStatus.split(" ")[0];
+							int rangeKey = (int) Math.min(5, Math.max(0, (tr.launchRange - 2000) / 500));
+							synchronized (ROOM_SHOTS) {
+								MODE_STATS.computeIfAbsent(modeKey, k -> new int[2])[0]++;
+								RANGE_SHOTS[rangeKey]++;
+								if (hit) {
+									MODE_STATS.get(modeKey)[1]++;
+									RANGE_HITS[rangeKey]++;
+								}
+								ROOM_SHOTS[bucket]++;
+								ASPECT_SHOTS[aspect]++;
+								SPEED_SHOTS[fast]++;
+								if (hit) {
+									ROOM_HITS[bucket]++;
+									ASPECT_HITS[aspect]++;
+									SPEED_HITS[fast]++;
+								}
+							}
+						}
+						if (hit && sideOfSlot[target.id()] == 0) {
+							// Our boat was hit: how did the run go?
+							double life = (tick - tr.launchTick) / 50.0;
+							double moved = Math.hypot(target.pose().position().x() - tr.victimX,
+									target.pose().position().y() - tr.victimY);
+							game.postMortem.append(String.format(Locale.ROOT,
+									"%n    HIT by torp %d: launched R=%.0f at t=%.0fs, room=%.0fm, we were v=%.1f rel=%+.0f '%s'; evade after %.0fs, flank after %.0fs; flight %.0fs fuelLeft=%.0f; we made good %.0fm (%.1f m/s) dmg=%d",
+									t.id(), tr.launchRange, tr.launchTick / 50.0, tr.victimRoom, tr.victimSpeed, tr.victimRel, tr.victimStatus,
+									tr.evadeTick < 0 ? -1 : (tr.evadeTick - tr.launchTick) / 50.0,
+									tr.fastTick < 0 ? -1 : (tr.fastTick - tr.launchTick) / 50.0, life, t.fuelRemaining(), moved,
+									moved / Math.max(life, 1), dmg));
+						}
 						if (hit) {
 							side.hits++;
 							side.hitRangeSum += tr.launchRange;
@@ -631,6 +732,17 @@ public final class Lab {
 			game.reason = "TIMEOUT";
 		}
 		return game;
+	}
+
+	/** Control experiment: same spawn points and water, but no terrain at all. */
+	private static GeneratedWorld flatten(GeneratedWorld generated) {
+		var t = generated.terrain();
+		double[] flat = new double[t.getCols() * t.getRows()];
+		java.util.Arrays.fill(flat, -600.0);
+		return new GeneratedWorld(generated.config(),
+				new se.hirt.searobots.api.TerrainMap(flat, t.getCols(), t.getRows(), t.getOriginX(), t.getOriginY(),
+						t.getCellSize()),
+				generated.thermalLayers(), generated.currentField(), generated.spawnPoints());
 	}
 
 	/** One-way sound loss (dB) from terrain and thermal layers between two points, as the engine models it. */
