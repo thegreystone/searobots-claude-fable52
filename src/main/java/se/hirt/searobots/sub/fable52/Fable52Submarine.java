@@ -330,7 +330,7 @@ public class Fable52Submarine implements SubmarineController {
 				mode = "KILL";
 				wantHeading = range > 1500 ? navigate(ex, ey) : clearHeading(bearing + side * Math.toRadians(70), 500);
 				wantSpeed = 12.0;
-			} else if (!comfortable) {
+			} else if (!comfortable && enemyRuns != 1) {
 				mode = "HOLD";
 				wantHeading = clearHeading(bearing + side * Math.toRadians(115), 900);
 				wantSpeed = 12.0;
