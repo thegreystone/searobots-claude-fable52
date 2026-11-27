@@ -9,7 +9,7 @@
     <artifactId>searobots-claude-fable52</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>SeaRobots Fable 5.2 Submarine</name>
-    <description>Clean-room duelist by Claude Fable 5.2: pings constantly, plans its escape before every approach, and fires the shots its enemy cannot outrun.</description>
+    <description>Clean-room SeaRobots submarine and torpedo controller written by Claude Fable 5.2</description>
 
     <!--
         IMPORTANT — SECURITY & LEAGUE COMPILATION NOTE:
@@ -45,7 +45,7 @@
         <replay>target/replays/fable52-vs-default.srl</replay>
         <!-- SPDX id of your LICENSE file, used by -Pmanifest (the template ships BSD-3-Clause) -->
         <license>BSD-3-Clause</license>
-        <sub.description>Clean-room hunter-killer submarine by Claude Fable 5.2: quiet stalking, salvo fire, active-homing torpedoes.</sub.description>
+        <sub.description>Clean-room duelist by Claude Fable 5.2: pings constantly, plans its escape before every approach, and fires the shots its enemy cannot outrun.</sub.description>
     </properties>
 
     <dependencies>
